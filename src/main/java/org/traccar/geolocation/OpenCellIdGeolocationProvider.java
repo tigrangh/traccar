@@ -20,42 +20,85 @@ import org.traccar.model.CellTower;
 import org.traccar.model.Network;
 
 import javax.json.JsonObject;
+import javax.swing.text.html.parser.Entity;
 import javax.ws.rs.client.InvocationCallback;
 
 public class OpenCellIdGeolocationProvider implements GeolocationProvider {
 
     private String url;
+    private Integer retry;
 
     public OpenCellIdGeolocationProvider(String url, String key) {
-        if (url == null) {
-            url = "http://opencellid.org/cell/get";
-        }
-        this.url = url + "?format=json&mcc=%d&mnc=%d&lac=%d&cellid=%d&key=" + key;
+        this.url = key;
+        retry = 0;
     }
 
     @Override
     public void getLocation(Network network, final LocationProviderCallback callback) {
         if (network.getCellTowers() != null && !network.getCellTowers().isEmpty()) {
 
-            CellTower cellTower = network.getCellTowers().iterator().next();
-            String request = String.format(url, cellTower.getMobileCountryCode(), cellTower.getMobileNetworkCode(),
-                    cellTower.getLocationAreaCode(), cellTower.getCellId());
+            String cellids = new String();
 
-            Context.getClient().target(request).request().async().get(new InvocationCallback<JsonObject>() {
+            Integer mcc = new Integer(0), mnc = new Integer(0);
+
+            for (CellTower cellTower : network.getCellTowers())
+            {
+                String cellid = String.format("{\"lac\":%d,\"cid\":%d}", cellTower.getLocationAreaCode(), cellTower.getCellId());
+
+                if (cellids.isEmpty())
+                    cellids += "[";
+                else
+                    cellids += ",";
+
+                cellids += cellid;
+
+                mcc = cellTower.getMobileCountryCode();
+                mnc = cellTower.getMobileNetworkCode();
+            }
+
+            cellids += "]";
+
+            String json = String.format("{\"token\":\"%s\",\"radio\":\"gsm\",\"mcc\":%d,\"mnc\":%d,\"cells\":%s,\"address\":1}", url, mcc, mnc, cellids);
+
+            System.out.println(json);
+
+            javax.ws.rs.client.Entity entity = javax.ws.rs.client.Entity.entity(json, javax.ws.rs.core.MediaType.APPLICATION_JSON);
+
+            Context.getClient().target("https://us1.unwiredlabs.com/v2/process.php").request().async().post(
+                entity,
+                new InvocationCallback<JsonObject>() {
                 @Override
                 public void completed(JsonObject json) {
+
+                    System.out.println(json);
+
                     if (json.containsKey("lat") && json.containsKey("lon")) {
+
+                        retry = 0;
+
                         callback.onSuccess(
                                 json.getJsonNumber("lat").doubleValue(),
                                 json.getJsonNumber("lon").doubleValue(), 0);
                     } else {
-                        callback.onFailure(new GeolocationException("Coordinates are missing"));
+
+                        if (retry < 10)
+                        {
+                            System.out.println("retry: " + retry);
+                            getLocation(network, callback);
+                        }
+                        else
+                        {
+                            callback.onFailure(new GeolocationException("Coordinates are missing"));
+                        }
+
+                        ++retry;
                     }
                 }
 
                 @Override
                 public void failed(Throwable throwable) {
                     callback.onFailure(throwable);
+                    retry = 0;
                 }
             });
 
